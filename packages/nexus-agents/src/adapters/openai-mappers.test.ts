@@ -332,3 +332,59 @@ describe('mapStreamChunk', () => {
     expect(result.some((c) => c.type === 'message_stop')).toBe(true);
   });
 });
+
+// ============================================================================
+// A stream whose usage was never reported must not carry a usage block
+// ============================================================================
+
+describe('mapStreamChunk usage on an unreported stream', () => {
+  // OpenAI populates `chunk.usage` on a streaming response ONLY when the
+  // request sets `stream_options: { include_usage: true }`, and nothing in this
+  // tree does — so the `?? 0` fallbacks always took the zero branch and every
+  // stream emitted `{inputTokens: 0, outputTokens: 0, totalTokens: 0}`: a usage
+  // block in which nothing whatsoever was measured.
+  //
+  // `inputTokensMeasured: false` covered only the first of the three. Its own
+  // contract is "whether `inputTokens` is a measurement", and there is no
+  // `outputTokensMeasured` — so a consumer honouring the flag discounted
+  // `inputTokens` and then read `outputTokens: 0` as a measured zero.
+  function finalChunk(usage?: {
+    completion_tokens: number;
+    total_tokens: number;
+  }): ChatCompletionChunk {
+    return {
+      model: 'gpt-4',
+      choices: [{ delta: {}, index: 0, finish_reason: 'stop' }],
+      ...(usage !== undefined ? { usage } : {}),
+    } as ChatCompletionChunk;
+  }
+
+  it('omits usage entirely when the API reported none', () => {
+    const delta = mapStreamChunk(finalChunk(), 1, true).find((c) => c.type === 'message_delta');
+
+    expect(delta).toBeDefined();
+    // The #4439 policy, stated on the field itself: where NOTHING is known,
+    // omit `usage` rather than zero-fill it.
+    expect(delta?.usage).toBeUndefined();
+  });
+
+  it('still emits the stop reason without usage', () => {
+    // Omitting usage must not cost the chunk its actual payload.
+    const delta = mapStreamChunk(finalChunk(), 1, true).find((c) => c.type === 'message_delta');
+
+    expect(delta?.delta?.stop_reason).toBe('end_turn');
+  });
+
+  it('keeps usage when the API did report it', () => {
+    // The pair. Without it, omitting usage unconditionally would pass — and
+    // that would discard a real measurement once `include_usage` is wired.
+    const delta = mapStreamChunk(
+      finalChunk({ completion_tokens: 42, total_tokens: 42 }),
+      1,
+      true
+    ).find((c) => c.type === 'message_delta');
+
+    expect(delta?.usage?.outputTokens).toBe(42);
+    expect(delta?.usage?.inputTokensMeasured).toBe(false);
+  });
+});

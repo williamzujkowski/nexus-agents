@@ -301,17 +301,39 @@ function mapFinishChunks(
       index: currentIndex,
     });
 
-    // Emit message_delta with stop reason
+    // Emit message_delta with stop reason.
+    //
+    // NO `usage` on this path. OpenAI populates `chunk.usage` on a streaming
+    // response only when the request sets `stream_options: { include_usage:
+    // true }`, and nothing in this tree does — so both `??` fallbacks always
+    // took the `0` branch and every stream emitted
+    // `{inputTokens: 0, outputTokens: 0, totalTokens: 0}`: a usage block in
+    // which nothing whatsoever was measured.
+    //
+    // `inputTokensMeasured: false` covered only the first of those three. Its
+    // own contract is "whether `inputTokens` is a measurement", and there is no
+    // `outputTokensMeasured`, so a consumer honouring the flag correctly
+    // discounted `inputTokens` and then read `outputTokens: 0` as a measured
+    // zero. That is the #4439 policy this violated, stated on the field itself:
+    // "Where NOTHING is known, prefer omitting `usage` entirely." The SDK
+    // adapter's stream path already does exactly that (#4835), for the same
+    // reason.
     chunks.push({
       type: 'message_delta',
       delta: { stop_reason: mapStopReason(choice.finish_reason) },
-      usage: {
-        // OpenAI streaming omits prompt_tokens on the final chunk (#4835).
-        inputTokens: 0,
-        inputTokensMeasured: false,
-        outputTokens: chunk.usage?.completion_tokens ?? 0,
-        totalTokens: chunk.usage?.total_tokens ?? 0,
-      },
+      // A stream whose usage IS reported keeps it — when `include_usage` is
+      // wired, this is the branch that carries a real measurement.
+      ...(chunk.usage !== undefined && chunk.usage !== null
+        ? {
+            usage: {
+              // OpenAI still omits prompt_tokens on the final chunk (#4835).
+              inputTokens: 0,
+              inputTokensMeasured: false,
+              outputTokens: chunk.usage.completion_tokens,
+              totalTokens: chunk.usage.total_tokens,
+            },
+          }
+        : {}),
     });
 
     // Emit message_stop
